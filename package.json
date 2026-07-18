@@ -1,0 +1,47 @@
+{
+  "name": "d17",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "type": "module",
+  "workspaces": [
+    "apps/web",
+    "apps/api",
+    "contracts"
+  ],
+  "engines": {
+    "node": "^22.13.0 || >=24.0.0"
+  },
+  "overrides": {
+    "next": {
+      "postcss": "8.5.19"
+    },
+    "postcss": "8.5.19",
+    "undici": "^6.27.0",
+    "ws": "^8.21.0"
+  },
+  "devDependencies": {
+    "postcss": "8.5.19"
+  },
+  "scripts": {
+    "dev": "npm run dev:rpc",
+    "dev:rpc": "npm run dev:rpc -w @d17/web",
+    "dev:api": "node scripts/run-local-stack.mjs",
+    "web:rpc": "npm run dev:rpc -w @d17/web",
+    "web:api": "npm run dev:api -w @d17/web",
+    "api:sepolia": "npm run start:sepolia -w @d17/api",
+    "api:mainnet": "npm run start:mainnet -w @d17/api",
+    "api:all": "npm run start:all -w @d17/api",
+    "build": "npm run build -w @d17/web",
+    "typecheck": "npm run typecheck -w @d17/web",
+    "test:api": "npm test -w @d17/api",
+    "test:contracts": "npm test -w @d17/contracts",
+    "release:protocol": "node scripts/generate-protocol-release.mjs",
+    "release:checksums": "node scripts/generate-release-checksums.mjs",
+    "check:docs": "node scripts/check-doc-links.mjs",
+    "check:release": "node scripts/check-release.mjs && node scripts/check-doc-links.mjs",
+    "verify": "npm run typecheck && npm run test:api && npm run test:contracts && npm run test:guard && npm run release:protocol && npm run check:release",
+    "test": "npm run typecheck && npm run test:api && npm run test:contracts && npm run test:guard",
+    "test:guard": "npm run test:guard -w @d17/web"
+  }
+}
