@@ -9,7 +9,7 @@ Short essays on the ideas inside the D17 launch mechanism — one per topic, eac
 | 03 | [The exit is part of the design](./03-the-exit-is-part-of-the-design.md) | Refund windows on every early round: free while momentum forms, a posted fee late, full refunds if the launch fails. |
 | 04 | [The ✓ is earned, not granted](./04-the-tick-is-earned-not-granted.md) | Metadata and economic rules have separate mechanical consistency checks. Neither is an endorsement. |
 | 05 | [Liquidity that cannot leave](./05-liquidity-that-cannot-leave.md) | The vault holds the LP position forever, and the token can't trade anywhere before its official pool opens. |
-| 06 | [Supply math that cannot lie](./06-supply-math-that-cannot-lie.md) | The split must sum exactly, the caps are `require` statements, and BURNED is computed — never typed. |
+| 06 | [Supply math that cannot lie](./06-supply-math-that-cannot-lie.md) | The split must sum exactly, the caps are `require` statements, and the dead-address allocation is computed — never typed. |
 | 07 | [Nobody gets stranded](./07-nobody-gets-stranded.md) | Every mandatory step is permissionless; every personal claim waits forever. Absence strands no one. |
 | 08 | [One signature](./08-one-signature.md) | A launch is born complete in one transaction — validated, minted, ownership renounced — or not at all. |
 

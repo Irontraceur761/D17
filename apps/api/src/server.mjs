@@ -92,7 +92,34 @@ const EXCLUDED_INGEST_EVENT_NAMES = new Set((process.env.EXCLUDED_INGEST_EVENTS 
   .filter(Boolean));
 const ALLOW_NOISY_API_EVENTS = process.env.ALLOW_NOISY_API_EVENTS === "1";
 const WATCH_PAIR_EVENTS = process.env.WATCH_PAIR_EVENTS === "1";
-const MIRRORED_LOCKER_EVENT_NAMES = new Set(["RoundCommitted", "RoundRefunded"]);
+const MIRRORED_EVENT_FAMILIES = new Map([
+  ["RoundCommitted", "RoundCommitted"],
+  ["RoundRefunded", "RoundRefunded"],
+  ["VaultSettlementClaimed", "VaultSettlementClaimed"],
+  ["LateVaultSettlementClaimed", "VaultSettlementClaimed"],
+  ["VaultSettlementCompleted", "VaultSettlementClaimed"],
+  ["LaunchFailedRefunded", "LaunchFailedRefunded"],
+  ["FailedLaunchRefunded", "LaunchFailedRefunded"],
+  ["OfficialPoolCreated", "OfficialPoolCreated"],
+  ["LiquidityPoolCreated", "OfficialPoolCreated"]
+]);
+const GENERIC_TOKEN_AMOUNT_EVENT_NAMES = new Set([
+  "ClaimedTokensWithdrawn",
+  "ManualDistributionConfigured",
+  "UnsoldSaleTokensBurned",
+  "UnsoldSaleTokensPaid",
+  "UnsupportedTokenRecovered"
+]);
+const GENERIC_WETH_AMOUNT_EVENT_NAMES = new Set([
+  "ExcessWethRecovered",
+  "ExcessWethSwept",
+  "RoundCommitted",
+  "WethWithdrawn"
+]);
+const GENERIC_NATIVE_AMOUNT_EVENT_NAMES = new Set([
+  "NativeEthRecovered",
+  "UnexpectedEthSwept"
+]);
 const LOCKER_BALANCE_REFRESH_MS = Number(process.env.LOCKER_BALANCE_REFRESH_MS || 30_000);
 const LOCKER_BALANCE_REFRESH_CONCURRENCY = Number(process.env.LOCKER_BALANCE_REFRESH_CONCURRENCY || 4);
 const LAUNCH_SNAPSHOT_REFRESH_MS = Number(process.env.LAUNCH_SNAPSHOT_REFRESH_MS || 15_000);
@@ -1219,13 +1246,12 @@ function writeLogoFile(token, logoSvgUri) {
 }
 
 function activityForLaunch(launchAddress, { limit, cursor, locker, includeTypes = new Set(), excludeTypes = new Set() }) {
-  const launchEvents = state.events
+  const launchEvents = dedupeMirroredEvents(state.events
     .filter((event) => eventForLaunch(event, launchAddress))
     .filter((event) => !locker || ethers.getAddress(event.args.locker || event.args.owner || "0x0000000000000000000000000000000000000000") === locker || event.address === locker)
     .filter(publicEvent)
-    .filter((event) => !isMirroredLockerEvent(event))
     .filter((event) => !includeTypes.size || includeTypes.has(event.eventName))
-    .filter((event) => !excludeTypes.has(event.eventName))
+    .filter((event) => !excludeTypes.has(event.eventName)))
     .sort((a, b) => b.blockNumber - a.blockNumber || b.logIndex - a.logIndex);
   const start = cursor ? Math.max(0, launchEvents.findIndex((event) => event.id === cursor) + 1) : 0;
   const rows = launchEvents.slice(start, start + limit).map(activityDto);
@@ -1236,15 +1262,61 @@ function publicEvent(event) {
   return ALLOW_NOISY_API_EVENTS || !EXCLUDED_INGEST_EVENT_NAMES.has(event.eventName);
 }
 
-function isMirroredLockerEvent(event) {
-  if (event.sourceKind !== "locker" || !MIRRORED_LOCKER_EVENT_NAMES.has(event.eventName)) return false;
-  const launchAddress = normalizeOptionalAddress(event.args?.launch);
-  if (!launchAddress) return false;
-  return state.events.some((candidate) => candidate !== event
-    && candidate.sourceKind === "launch"
-    && candidate.address === launchAddress
-    && candidate.txHash === event.txHash
-    && candidate.eventName === event.eventName);
+function mirroredEventClassification(event) {
+  const family = MIRRORED_EVENT_FAMILIES.get(event.eventName);
+  if (!family) return null;
+
+  let side = null;
+  if (event.eventName === "RoundCommitted" || event.eventName === "RoundRefunded") {
+    if (event.sourceKind === "launch") side = "primary";
+    else if (event.sourceKind === "locker") side = "mirror";
+  } else if (["VaultSettlementClaimed", "LateVaultSettlementClaimed", "LaunchFailedRefunded", "OfficialPoolCreated"].includes(event.eventName)) {
+    side = "primary";
+  } else {
+    side = "mirror";
+  }
+  if (!side) return null;
+
+  const locker = normalizeOptionalAddress(event.args?.locker)
+    || (event.sourceKind === "locker" ? normalizeOptionalAddress(event.address) : null)
+    || "";
+  const parts = [event.txHash || "", family, locker.toLowerCase()];
+  if (family === "RoundCommitted") {
+    parts.push(String(event.args?.round ?? ""), String(event.args?.amount ?? ""));
+  } else if (family === "RoundRefunded") {
+    parts.push(
+      String(event.args?.round ?? event.args?.refundRound ?? ""),
+      String(event.args?.refundWeth ?? ""),
+      String(event.args?.penaltyWeth ?? "")
+    );
+  } else if (family === "LaunchFailedRefunded") {
+    parts.push(String(event.args?.refundWeth ?? ""));
+  }
+  return { key: parts.join(":"), side };
+}
+
+function dedupeMirroredEvents(events) {
+  const keep = new Set();
+  const groups = new Map();
+  for (const event of events) {
+    const classification = mirroredEventClassification(event);
+    if (!classification) {
+      keep.add(event);
+      continue;
+    }
+    const group = groups.get(classification.key) || { primary: [], mirror: [] };
+    group[classification.side].push(event);
+    groups.set(classification.key, group);
+  }
+  for (const group of groups.values()) {
+    if (group.primary.length === 0) {
+      for (const event of group.mirror) keep.add(event);
+      continue;
+    }
+    for (const event of group.primary) keep.add(event);
+    for (const event of group.mirror.slice(group.primary.length)) keep.add(event);
+  }
+  return events.filter((event) => keep.has(event));
 }
 
 function deployerSchema() {
@@ -1433,7 +1505,7 @@ function lockerDto(locker, launchAddress) {
     lockerWethBalance: balances.accountedWeth,
     balanceSource: balances.source,
     balanceRefreshedAt: balances.refreshedAt,
-    events: events.filter((event) => !isMirroredLockerEvent(event)).map(activityDto)
+    events: dedupeMirroredEvents(events.filter(publicEvent)).map(activityDto)
   };
 }
 
@@ -1450,17 +1522,11 @@ function aggregateLocker(events) {
     lastBlock: 0
   };
   const roundBig = Array.from({ length: 5 }, () => ({ committedWeth: 0n, refundedWeth: 0n, penaltyWeth: 0n }));
-  const seenCommits = new Set();
-  const seenRefunds = new Set();
-  const seenSettlements = new Set();
-  for (const event of events) {
+  for (const event of dedupeMirroredEvents(events)) {
     summary.lastBlock = Math.max(summary.lastBlock, event.blockNumber);
     if (event.eventName === "RoundCommitted") {
       const round = Number(event.args.round);
       const amount = BigInt(event.args.amount || 0);
-      const key = `${event.txHash}:commit:${round}:${amount}`;
-      if (seenCommits.has(key)) continue;
-      seenCommits.add(key);
       summary.committedWeth += amount;
       if (roundBig[round]) roundBig[round].committedWeth += amount;
     }
@@ -1468,9 +1534,6 @@ function aggregateLocker(events) {
       const round = Number(event.args.round ?? event.args.refundRound ?? 0);
       const refund = BigInt(event.args.refundWeth || 0);
       const penalty = BigInt(event.args.penaltyWeth || 0);
-      const key = `${event.txHash}:refund:${round}:${refund}:${penalty}`;
-      if (seenRefunds.has(key)) continue;
-      seenRefunds.add(key);
       summary.refundedWeth += refund;
       summary.penaltyWeth += penalty;
       if (roundBig[round]) {
@@ -1480,9 +1543,6 @@ function aggregateLocker(events) {
     }
     if (event.eventName === "VaultSettlementClaimed" || event.eventName === "LateVaultSettlementClaimed" || event.eventName === "VaultSettlementCompleted") {
       summary.settled = true;
-      const key = `${event.txHash}:settlement`;
-      if (seenSettlements.has(key)) continue;
-      seenSettlements.add(key);
       summary.settledWeth += BigInt(event.args.wethForVault || event.args.wethSentToVault || 0);
       summary.saleTokens += BigInt(event.args.saleTokens || event.args.claimedSaleTokens || 0);
     }
@@ -1580,7 +1640,28 @@ function lateEventTotals(launchAddress, additionalEvent = null) {
   return Object.fromEntries(Object.entries(totals).map(([key, value]) => [key, value.toString()]));
 }
 
+function firstEventArg(args, ...names) {
+  for (const name of names) {
+    if (args?.[name] !== undefined && args[name] !== null && args[name] !== "") return args[name];
+  }
+  return null;
+}
+
+function activityAmounts(event) {
+  const args = event.args || {};
+  let amountWeth = firstEventArg(args, "refundWeth", "wethForVault", "wethSentToVault", "wethForPool", "wethUsed");
+  let amountToken = firstEventArg(args, "saleTokens", "liquidityTokens", "tokenUsed", "value");
+  let amountNative = null;
+
+  if (GENERIC_TOKEN_AMOUNT_EVENT_NAMES.has(event.eventName)) amountToken = firstEventArg(args, "amount") ?? amountToken;
+  if (GENERIC_WETH_AMOUNT_EVENT_NAMES.has(event.eventName)) amountWeth = firstEventArg(args, "amount") ?? amountWeth;
+  if (GENERIC_NATIVE_AMOUNT_EVENT_NAMES.has(event.eventName)) amountNative = firstEventArg(args, "amount");
+
+  return { amountWeth, amountToken, amountNative };
+}
+
 function activityDto(event) {
+  const amounts = activityAmounts(event);
   return {
     id: event.id,
     eventName: event.eventName,
@@ -1589,8 +1670,9 @@ function activityDto(event) {
     locker: event.args.locker || (event.sourceKind === "locker" ? event.address : null),
     owner: event.args.owner || state.lockers[event.address]?.owner || null,
     roundIndex: event.args.round ?? event.args.refundRound ?? null,
-    amountWeth: event.args.amount || event.args.refundWeth || event.args.wethForVault || event.args.wethUsed || null,
-    amountToken: event.args.saleTokens || event.args.tokenUsed || event.args.value || null,
+    amountWeth: amounts.amountWeth,
+    amountToken: amounts.amountToken,
+    amountNative: amounts.amountNative,
     penaltyWeth: event.args.penaltyWeth || null,
     txHash: event.txHash,
     blockNumber: event.blockNumber,
@@ -1604,8 +1686,37 @@ function launchDto(launch) {
   const current = decorateLaunchForApi(launch);
   return {
     ...current,
+    unsoldSaleTokens: unsoldSaleTokenDispositionDto(current),
     lockers: lockersForLaunch(current.launch).map(({ events, ...summary }) => summary),
-    activityCount: state.events.filter((event) => eventForLaunch(event, current.launch) && publicEvent(event) && !isMirroredLockerEvent(event)).length
+    activityCount: dedupeMirroredEvents(state.events.filter((event) => eventForLaunch(event, current.launch) && publicEvent(event))).length
+  };
+}
+
+function unsoldSaleTokenDispositionDto(launch) {
+  const event = state.events
+    .filter((candidate) => eventForLaunch(candidate, launch.launch))
+    .filter((candidate) => candidate.eventName === "UnsoldSaleTokensBurned" || candidate.eventName === "UnsoldSaleTokensPaid")
+    .sort((left, right) => right.blockNumber - left.blockNumber || right.logIndex - left.logIndex)[0] || null;
+  const amount = decimalString(firstEventArg(event?.args, "amount") ?? launch.unsoldSaleTokensSettled);
+  const failed = launch.phase?.label === "failed";
+  let status = "pending";
+  if (failed) status = "not-applicable";
+  else if (event?.eventName === "UnsoldSaleTokensBurned") status = "burned";
+  else if (event?.eventName === "UnsoldSaleTokensPaid") status = "paid-to-treasury";
+  else if (launch.finalized && amount === "0") status = "none";
+  else if (launch.finalized) status = launch.burnUnsoldSaleTokens ? "burned" : "paid-to-treasury";
+
+  return {
+    configuredPolicy: launch.burnUnsoldSaleTokens ? "burn" : "pay-treasury",
+    status,
+    amount,
+    recipient: status === "paid-to-treasury"
+      ? normalizeOptionalAddress(event?.args?.recipient) || launch.treasury || null
+      : null,
+    txHash: event?.txHash || null,
+    blockNumber: event?.blockNumber ?? null,
+    timestamp: event?.timestamp ?? null,
+    source: event ? "event" : "contract-state"
   };
 }
 
@@ -1662,15 +1773,19 @@ function tokenomicsDto(launch) {
   const deadTokens = decimalString(launch.deadTokens);
   const manualDistributionTokens = decimalString(launch.manualDistributionTokens);
   const supply = decimalString(launch.tokenSupply || launch.tokenMaxSupply || tokenSupplyFromParts(saleTokens, lpTokens, deadTokens, manualDistributionTokens));
+  const maxSupply = decimalString(launch.tokenMaxSupply || supply);
+  const totalSupply = launch.tokenTotalSupply != null ? decimalString(launch.tokenTotalSupply) : null;
+  const burnedTokens = totalSupply == null ? null : nonNegativeDelta(maxSupply, totalSupply);
   return {
     supply,
     tokenSupply: supply,
-    maxSupply: decimalString(launch.tokenMaxSupply || supply),
-    totalSupply: launch.tokenTotalSupply ? decimalString(launch.tokenTotalSupply) : null,
+    maxSupply,
+    totalSupply,
     saleTokens,
     lpTokens,
     deadTokens,
-    burnedTokens: deadTokens,
+    deadAddressAllocationTokens: deadTokens,
+    burnedTokens,
     manualDistributionTokens,
     deployerAirdropTokens: decimalString(launch.deployerAirdropTokens || manualDistributionTokens),
     manualDistributionRecipient: launch.manualDistributionRecipient || launch.creator || "",

@@ -22,6 +22,40 @@ Sepolia and Ethereum mainnet through the `TESTNET | MAINNET` switch.
 > real ETH and WETH. Review the contracts, launch settings and every wallet
 > transaction independently.
 
+## Deploy the web app on Vercel
+
+[![D17 one-click Vercel installation](./d17-installer-hero.png)][d17-vercel-deploy]
+
+[![Deploy with Vercel](https://vercel.com/button)][d17-vercel-deploy]
+
+### Install it in five clear steps
+
+> **Start here:** click the large image above or the small **Deploy with
+> Vercel** button directly beneath it. Both open the same official Vercel
+> setup page. You do not need to download this repository or run a command.
+
+1. Click either installation link above.
+2. Sign in to Vercel. If Vercel asks you to connect GitHub, GitLab or
+   Bitbucket, follow that prompt so it can create your editable copy.
+3. Choose the account that should own the copy. You may keep the suggested
+   project and repository names.
+4. For a first testnet installation, leave the pre-filled settings unchanged.
+   They select Sepolia and public Direct RPC endpoints. You can replace those
+   endpoints with compatible RPC URLs that you control.
+5. Click **Deploy**, wait for the build to finish, then click **Visit**. The
+   resulting site includes the participant terminal, the `TESTNET | MAINNET`
+   switch and the `/deploy` page.
+
+This creates a personal copy of the standalone web application in **Direct
+RPC mode**. Vercel pre-fills public Sepolia and mainnet RPC endpoints, and you
+can replace them with any compatible endpoints before deploying. The web app
+includes the participant terminal and `/deploy`; wallet transactions still go
+directly from the browser wallet to the selected chain.
+
+The button does **not** deploy the optional indexed API and does not grant
+access to D17's temporary hosted infrastructure. No seed phrase, private key,
+database or D17 API credential is requested.
+
 ## Start locally in five steps
 
 The simplest setup reads Ethereum directly from an RPC endpoint. It needs no
@@ -202,6 +236,10 @@ contracts cannot fail or that the source contains no defects.
 The included API is useful when you want fast snapshots and one shared index
 instead of asking every browser to scan RPC logs independently.
 
+It is a separate, self-hosted service under `apps/api`. It runs from any
+compatible Ethereum RPC endpoint you configure; it is not created by the
+Vercel button above and it does not depend on D17's private infrastructure.
+
 ```bash
 cp apps/api/.env.sepolia.example apps/api/.env.sepolia
 cp apps/api/.env.mainnet.example apps/api/.env.mainnet
@@ -281,3 +319,5 @@ D17 is released under the [MIT License](./LICENSE). It is an experimental
 mechanism, reference application and educational project. It is not investment
 advice and does not promise token value, market liquidity or freedom from
 software defects.
+
+[d17-vercel-deploy]: https://vercel.com/new/clone?repository-url=https%3A%2F%2Fgithub.com%2F0xlocker%2FD17&root-directory=apps%2Fweb&project-name=d17&repository-name=d17&env=NEXT_PUBLIC_D17_DATA_MODE%2CNEXT_PUBLIC_D17_DEFAULT_NETWORK%2CNEXT_PUBLIC_D17_SEPOLIA_RPC_URL%2CNEXT_PUBLIC_D17_MAINNET_RPC_URL%2CNEXT_PUBLIC_D17_SEPOLIA_EXPLORER_BASE%2CNEXT_PUBLIC_D17_MAINNET_EXPLORER_BASE%2CNEXT_PUBLIC_SITE_MODE%2CNEXT_PUBLIC_ENABLE_DEPLOY%2CNEXT_PUBLIC_ENABLE_TEST_CONTROLS%2CNEXT_PUBLIC_ENABLE_USD&envDefaults=%7B%22NEXT_PUBLIC_D17_DATA_MODE%22%3A%22rpc%22%2C%22NEXT_PUBLIC_D17_DEFAULT_NETWORK%22%3A%22sepolia%22%2C%22NEXT_PUBLIC_D17_SEPOLIA_RPC_URL%22%3A%22https%3A%2F%2Fsepolia.drpc.org%22%2C%22NEXT_PUBLIC_D17_MAINNET_RPC_URL%22%3A%22https%3A%2F%2Feth.drpc.org%22%2C%22NEXT_PUBLIC_D17_SEPOLIA_EXPLORER_BASE%22%3A%22https%3A%2F%2Fsepolia.etherscan.io%22%2C%22NEXT_PUBLIC_D17_MAINNET_EXPLORER_BASE%22%3A%22https%3A%2F%2Fetherscan.io%22%2C%22NEXT_PUBLIC_SITE_MODE%22%3A%22full%22%2C%22NEXT_PUBLIC_ENABLE_DEPLOY%22%3A%22true%22%2C%22NEXT_PUBLIC_ENABLE_TEST_CONTROLS%22%3A%22false%22%2C%22NEXT_PUBLIC_ENABLE_USD%22%3A%22false%22%7D&envDescription=Public+Direct-RPC+settings+for+D17.+No+seed+phrase%2C+private+key%2C+or+D17+API+credential+is+required.

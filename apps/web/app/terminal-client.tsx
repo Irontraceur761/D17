@@ -36,6 +36,8 @@ import { NetworkSwitch } from "@/components/network-switch";
 import { ACTIVE_NETWORK, d17Href } from "@/lib/d17Network";
 import { PUBLIC_DEPLOYMENT } from "@/lib/d17Manifest";
 import { commitIfCurrentGeneration, isCurrentGeneration } from "@/lib/refresh-guard.mjs";
+import { dedupeActivityActions, dedupeActivityForDisplay } from "@/lib/activity-dedupe.mjs";
+import { loadActivityHistory } from "@/lib/activity-history.mjs";
 import { redirect } from "next/navigation";
 
 declare global {
@@ -387,9 +389,11 @@ type ApiLockerSummary = {
   owner?: string;
   committedWeth?: string;
   refundedWeth?: string;
+  penaltyWeth?: string;
   settledWeth?: string;
   saleTokens?: string;
   settled?: boolean;
+  lastBlock?: number;
   rounds?: { round?: number; committedWeth?: string; refundedWeth?: string; penaltyWeth?: string }[];
   // Locker WETH balances, served by the backend (cached contract reads).
   lockedWeth?: string;
@@ -537,15 +541,17 @@ type PoolCompositionLine = {
  *  topped up by late settlements). */
 function poolCompositionParts(comp: PoolCompositionLine, symbol: string, ctx: CurrencyCtx): string[] {
   const token = (value: bigint) => compactNumber(Number(ethers.formatUnits(value, 18)));
-  // WETH → active currency (2dp ETH, or USD). Full precision belongs on
-  // Etherscan, not an inline summary.
+  // WETH → active currency. Small pools need enough precision to avoid
+  // turning a real non-zero reserve into the false statement "0 WETH".
   const weth = (value: bigint) => {
     const eth = Number(ethers.formatUnits(value, 18));
     if (ctx.usd && ctx.rate) {
       const usd = eth * ctx.rate;
       return `$${usd.toLocaleString("en-US", { maximumFractionDigits: usd >= 1000 ? 0 : 2 })}`;
     }
-    return `${trimDecimals(eth.toFixed(2), 2)} WETH`;
+    if (eth > 0 && eth < 0.000001) return "<0.000001 WETH";
+    const digits = eth > 0 && eth < 0.01 ? 6 : eth < 1 ? 4 : 2;
+    return `${trimDecimals(eth.toFixed(digits), digits)} WETH`;
   };
   const parts: string[] = [];
   if (comp.seededToken > 0n || comp.seededWeth > 0n)
@@ -615,6 +621,7 @@ type ActivityItem = {
   amountWeth?: string;
   amountToken?: string;
   penaltyWeth?: string;
+  recipient?: string;
   hash: string;
   blockNumber: number;
   logIndex: number;
@@ -634,6 +641,38 @@ type LockerSummary = {
   lastBlock: number;
 };
 
+function apiLockerToSummary(locker: ApiLockerSummary): LockerSummary | null {
+  if (!locker.locker || !ethers.isAddress(locker.locker)) return null;
+  const rounds = Array.from({ length: ROUND_COUNT }, () => 0n);
+  for (const entry of locker.rounds || []) {
+    const round = Number(entry.round);
+    if (Number.isInteger(round) && round >= 0 && round < ROUND_COUNT) rounds[round] = toWei(entry.committedWeth);
+  }
+  return {
+    locker: ethers.getAddress(locker.locker),
+    owner: locker.owner && ethers.isAddress(locker.owner) ? ethers.getAddress(locker.owner) : undefined,
+    committedWeth: toWei(locker.committedWeth),
+    refundedWeth: toWei(locker.refundedWeth),
+    penaltyWeth: toWei(locker.penaltyWeth),
+    settledWeth: toWei(locker.settledWeth),
+    saleTokens: toWei(locker.saleTokens),
+    rounds,
+    settled: Boolean(locker.settled),
+    lastBlock: Number(locker.lastBlock || 0),
+  };
+}
+
+async function loadApiActivityHistory(launch: string, cachedItems: ApiActivityItem[]) {
+  return loadActivityHistory<ApiActivityItem>(async (cursor) => {
+    const { data, meta } = await getActivity(launch, { limit: 500, ...(cursor ? { cursor } : {}) });
+    return {
+      items: (Array.isArray(data) ? data : data.items ?? []) as ApiActivityItem[],
+      nextCursor: Array.isArray(data) ? null : data.nextCursor || null,
+      stale: Boolean(meta.stale),
+    };
+  }, cachedItems);
+}
+
 type TimelineStage = {
   id: string;
   title: string;
@@ -643,6 +682,7 @@ type TimelineStage = {
   active: boolean;
   done: boolean;
   failed?: boolean;
+  skipped?: boolean;
   disabled?: boolean;
 };
 
@@ -948,6 +988,10 @@ function ParticipantsTerminal() {
   }, [lockerAddress]);
   const [flashIds, setFlashIds] = useState<Set<string>>(() => new Set());
   const seenActivityIdsRef = useRef<Set<string>>(new Set());
+  // API activity loads complete history once, then pages only until it
+  // overlaps this cache. This keeps lifecycle facts complete without turning
+  // each 12s safety reconcile into a full-history download.
+  const apiActivityCacheRef = useRef<{ key: string; items: ApiActivityItem[] } | null>(null);
   // RPC activity is scanned incrementally; decoded events + block times are
   // cached per launch+vault so the 12s poll only re-queries the recent window.
   const rpcActivityCacheRef = useRef<{ key: string; throughBlock: number; events: any[] } | null>(null);
@@ -1074,7 +1118,7 @@ function ParticipantsTerminal() {
     if (!isReplay || !liveLaunchStats) return liveLaunchStats;
     let total = 0;
     let roundOne = 0;
-    for (const item of activityItems) {
+    for (const item of dedupeActivityActions(activityItems)) {
       const outflow = Number(item.amountWeth || 0) + Number(item.penaltyWeth || 0);
       if (item.event === "RoundCommitted") {
         total += Number(item.amountWeth || 0);
@@ -1124,9 +1168,10 @@ function ParticipantsTerminal() {
   const rulesHashForTx = expectedRulesHash.trim() || ZERO_HASH;
   const averageWalletPriceLabel = formatPriceNumber(averageWalletPrice);
   const participantLink = launchAddress ? d17Href("/", { launch: launchAddress }) : "";
+  const displayActivityItems = useMemo(() => dedupeActivityForDisplay(activityItems), [activityItems]);
   const filteredActivity = selectedLockerForFeed
-    ? activityItems.filter((item) => item.locker?.toLowerCase() === selectedLockerForFeed.toLowerCase())
-    : activityItems;
+    ? displayActivityItems.filter((item) => item.locker?.toLowerCase() === selectedLockerForFeed.toLowerCase())
+    : displayActivityItems;
   const indexedNetCommitted = useMemo(
     () => lockerSummaries.reduce((total, item) => total + netCommitted(item), 0n),
     [lockerSummaries]
@@ -1136,10 +1181,10 @@ function ParticipantsTerminal() {
   // Facts for the lifecycle stage expandables — event-derived, so replay
   // mode shows period-correct history too.
   const lifecycleFacts = useMemo<LifecycleFacts>(() => {
-    const find = (...names: string[]) => activityItems.find((item) => names.includes(item.event));
+    const find = (...names: string[]) => displayActivityItems.find((item) => names.includes(item.event));
     return {
       finalized: find("Finalized"),
-      unsoldBurned: find("UnsoldSaleTokensBurned", "UnsoldSaleTokensPaid"),
+      unsoldDisposition: find("UnsoldSaleTokensBurned", "UnsoldSaleTokensPaid"),
       poolCreated: find("OfficialPoolCreated", "LiquidityPoolCreated"),
       vaultLiquidity: find("VaultLiquidityTokensClaimed"),
       settledCount: settledLockerCount,
@@ -1151,7 +1196,7 @@ function ParticipantsTerminal() {
       tokenAddress,
     };
   }, [
-    activityItems,
+    displayActivityItems,
     settledLockerCount,
     lockerSummaries.length,
     indexedNetCommitted,
@@ -1714,14 +1759,15 @@ function ParticipantsTerminal() {
         const perRoundRaised = Array.from({ length: ROUND_COUNT }, () => 0n);
         let totalNet = 0n;
         for (const locker of lockers) {
-          totalNet += toWei(locker.committedWeth) - toWei(locker.refundedWeth);
+          totalNet += toWei(locker.committedWeth) - toWei(locker.refundedWeth) - toWei(locker.penaltyWeth);
           for (const roundEntry of locker.rounds || []) {
             const round = Number(roundEntry.round);
             if (Number.isInteger(round) && round >= 0 && round < ROUND_COUNT) {
-              perRoundRaised[round] += toWei(roundEntry.committedWeth) - toWei(roundEntry.refundedWeth);
+              perRoundRaised[round] += toWei(roundEntry.committedWeth) - toWei(roundEntry.refundedWeth) - toWei(roundEntry.penaltyWeth);
             }
           }
         }
+        setLockerSummaries(lockers.map(apiLockerToSummary).filter((item): item is LockerSummary => item !== null));
         setRoundMarket(() =>
           Array.from({ length: ROUND_COUNT }, (_, index) => {
             const priceWad = toWei(apiRounds[index]?.discoveredPriceWad);
@@ -2075,9 +2121,9 @@ function ParticipantsTerminal() {
     if (announce) setManualIndexing(true);
     try {
       let activity: ActivityItem[];
-      let summaries: LockerSummary[];
+      let summaries: LockerSummary[] | null;
       let statusLabel: string;
-      let rpcCommit: (() => void) | null = null;
+      let deferredCommit: (() => void) | null = null;
 
       if (dataMode() === "api") {
         // The win: the backend already indexed the launch, so we skip the
@@ -2085,31 +2131,34 @@ function ParticipantsTerminal() {
         try {
           // Noisy pair/ERC20 events (Swap/Sync/Transfer/Approval) are excluded
           // at backend ingestion — nothing to filter client-side.
-          const { data, meta } = await getActivity(ethers.getAddress(launchAddress), { limit: 500 });
-          const apiItems = (Array.isArray(data) ? data : data.items ?? []) as ApiActivityItem[];
+          const normalizedLaunch = ethers.getAddress(launchAddress);
+          const cached = apiActivityCacheRef.current?.key === normalizedLaunch ? apiActivityCacheRef.current.items : [];
+          const loaded = await loadApiActivityHistory(normalizedLaunch, cached);
+          const apiItems = loaded.items;
           activity = apiItems
             .map(apiToActivityItem)
             .sort((a, b) => (a.blockNumber !== b.blockNumber ? b.blockNumber - a.blockNumber : b.logIndex - a.logIndex));
-          // aggregateLockerSummaries is chain-free; owners ride on the API items.
-          summaries = aggregateLockerSummaries(activity);
-          const ownerByLocker = new Map<string, string>();
-          for (const item of apiItems) {
-            if (item.locker && item.owner && ethers.isAddress(item.locker) && ethers.isAddress(item.owner)) {
-              ownerByLocker.set(ethers.getAddress(item.locker), ethers.getAddress(item.owner));
-            }
-          }
-          for (const summary of summaries) {
-            const owner = ownerByLocker.get(summary.locker);
-            if (owner) summary.owner = owner;
-          }
-          statusLabel = `${activity.length} events · via API${meta.stale ? " · stale" : ""}`;
+          // Authoritative locker totals come from /lockers in refreshState.
+          // Activity remains complete for history/replay through this
+          // overlap-aware cache, without downloading every old page on each
+          // safety reconcile.
+          summaries = null;
+          statusLabel = `${dedupeActivityForDisplay(activity).length} events · via API${loaded.stale ? " · stale" : ""}`;
+          deferredCommit = () => {
+            apiActivityCacheRef.current = { key: normalizedLaunch, items: apiItems };
+          };
         } catch {
           // A launch the indexer hasn't picked up yet (the frontend opens
           // before the launch deploys) 404s — that's a normal empty state,
           // not an error to toast about every poll.
-          activity = [];
-          summaries = [];
-          statusLabel = "Waiting for indexer";
+          const cached = apiActivityCacheRef.current?.key === ethers.getAddress(launchAddress)
+            ? apiActivityCacheRef.current.items
+            : [];
+          activity = cached
+            .map(apiToActivityItem)
+            .sort((a, b) => (a.blockNumber !== b.blockNumber ? b.blockNumber - a.blockNumber : b.logIndex - a.logIndex));
+          summaries = null;
+          statusLabel = cached.length > 0 ? `${dedupeActivityForDisplay(activity).length} events · reconnecting` : "Waiting for indexer";
         }
       } else {
         const provider = readProvider();
@@ -2171,7 +2220,7 @@ function ParticipantsTerminal() {
         for (const [block, timestamp] of loadedTimes) nextBlockTimes.set(block, timestamp);
         activity = events.map((event) => toActivityItem(event, nextBlockTimes.get(event.blockNumber)));
         summaries = await buildLockerSummaries(activity, provider);
-        statusLabel = `${activity.length} events · blocks ${baseFromBlock.toLocaleString()}–${latestBlock.toLocaleString()}`;
+        statusLabel = `${dedupeActivityForDisplay(activity).length} events · blocks ${baseFromBlock.toLocaleString()}–${latestBlock.toLocaleString()}`;
 
         // The official pool address + composition ride on the vault events —
         // no indexer needed. The reserved remainder is the LP allocation not
@@ -2205,7 +2254,7 @@ function ParticipantsTerminal() {
             reservedTokens: reserved > 0n ? reserved : 0n,
           };
         }
-        rpcCommit = () => {
+        deferredCommit = () => {
           rpcActivityCacheRef.current = { key: cacheKey, throughBlock: latestBlock, events };
           rpcBlockTimesRef.current = nextBlockTimes;
           if (poolPair) setPoolAddress(poolPair);
@@ -2214,7 +2263,7 @@ function ParticipantsTerminal() {
       }
       // Generation gate: the final awaited read is behind us. A refresh that
       // no longer belongs to the selected launch is discarded whole.
-      if (!commitIfCurrentGeneration(generation, launchGenRef.current, () => rpcCommit?.())) return;
+      if (!commitIfCurrentGeneration(generation, launchGenRef.current, () => deferredCommit?.())) return;
       const seen = seenActivityIdsRef.current;
       if (seen.size > 0) {
         const fresh = new Set(activity.filter((item) => !seen.has(item.id)).map((item) => item.id));
@@ -2242,12 +2291,12 @@ function ParticipantsTerminal() {
       }
       for (const item of activity) seen.add(item.id);
       setActivityItems(activity);
-      setLockerSummaries(summaries);
+      if (summaries) setLockerSummaries(summaries);
       setIndexLoaded(true);
       setIndexStatus(statusLabel);
       if (announce) {
         toast("Activity indexed", {
-          description: `${activity.length} launch events loaded.`,
+          description: `${dedupeActivityForDisplay(activity).length} launch events loaded.`,
         });
       }
     } catch (error) {
@@ -2628,6 +2677,7 @@ function ParticipantsTerminal() {
     setPoolAddress("");
     setPoolComposition(null);
     setAnchorPriceWeth("");
+    apiActivityCacheRef.current = null;
     rpcActivityCacheRef.current = null;
     rpcBlockTimesRef.current = new Map();
     toast("Launch selected", {
@@ -3579,15 +3629,15 @@ function ParticipantsTerminal() {
                           rel="noreferrer"
                           className="text-electric underline decoration-dotted underline-offset-2 transition-colors hover:text-ink"
                         >
-                          Trade now <span aria-hidden>↗</span>
+                          Trade on Uniswap <span aria-hidden>↗</span>
                         </a>
                         <a
-                          href={`https://dexscreener.com/ethereum/${tokenAddress}`}
+                          href={`https://dexscreener.com/ethereum/${poolAddress || tokenAddress}`}
                           target="_blank"
                           rel="noreferrer"
                           className="text-electric underline decoration-dotted underline-offset-2 transition-colors hover:text-ink"
                         >
-                          View chart <span aria-hidden>↗</span>
+                          View on Dexscreener <span aria-hidden>↗</span>
                         </a>
                         {!IS_MAINNET && (
                           <span className="text-[10px] text-dim">
@@ -4254,7 +4304,7 @@ function LaunchMasthead({
   const name = metadata.tokenName?.trim();
   const symbol = metadata.tokenSymbol?.trim();
   // Tokenomics chips from the real launch config (token split + the treasury
-  // WETH cut). Total supply = sale + LP + deployer + burned. Deflection is
+  // WETH cut). Total supply = sale + LP + deployer + dead-address allocation. Deflection is
   // NOT shown here — it's per-round (early rounds are free), so it lives on
   // the round rows, not as one misleading launch-level number.
   const tokenomics: { label: string; value: string }[] = [];
@@ -4266,7 +4316,7 @@ function LaunchMasthead({
       tokenomics.push({ label: "Sale", value: pct(config.saleTokens) });
       if (config.lpTokens > 0n) tokenomics.push({ label: "LP", value: pct(config.lpTokens) });
       if (config.manualTokens > 0n) tokenomics.push({ label: "Deployer", value: pct(config.manualTokens) });
-      if (config.deadTokens > 0n) tokenomics.push({ label: "Burned", value: pct(config.deadTokens) });
+      if (config.deadTokens > 0n) tokenomics.push({ label: "Dead address", value: pct(config.deadTokens) });
     }
     if (config.treasuryPct > 0) tokenomics.push({ label: "Treasury", value: `${config.treasuryPct}% ETH` });
   }
@@ -4524,7 +4574,7 @@ function RoundTable({
  *  happened, when, and the contracts involved. */
 type LifecycleFacts = {
   finalized?: ActivityItem;
-  unsoldBurned?: ActivityItem;
+  unsoldDisposition?: ActivityItem;
   poolCreated?: ActivityItem;
   vaultLiquidity?: ActivityItem;
   settledCount: number;
@@ -4558,14 +4608,16 @@ function lifecycleRows(id: string, facts: LifecycleFacts, stage: TimelineStage, 
         },
         {
           label: "Unsold sale tokens",
-          value: facts.unsoldBurned
-            ? facts.unsoldBurned.amountToken
-              ? `${facts.unsoldBurned.amountToken} burned`
-              : "Burned"
+          value: facts.unsoldDisposition
+            ? facts.unsoldDisposition.event === "UnsoldSaleTokensPaid"
+              ? `${facts.unsoldDisposition.amountToken || "Tokens"} paid to treasury${
+                  facts.unsoldDisposition.recipient ? ` (${shortAddress(facts.unsoldDisposition.recipient)})` : ""
+                }`
+              : `${facts.unsoldDisposition.amountToken || "Tokens"} burned`
             : facts.finalized
               ? "None"
               : "Not yet",
-          href: tx(facts.unsoldBurned),
+          href: tx(facts.unsoldDisposition),
         },
       ];
     case "settlement":
@@ -4763,10 +4815,41 @@ function LaunchTimeline({
                   </p>
                 </div>
               ) : (
-                <p className="font-mono text-[10px] uppercase tracking-[0.02em] text-quiet">No activity in this round yet.</p>
+                <p className="font-mono text-[10px] uppercase tracking-[0.02em] text-quiet">
+                  {stage.skipped ? "This configured stage did not open." : "No activity in this round yet."}
+                </p>
               )}
             </div>
           );
+
+          if (stage.skipped) {
+            return (
+              <div key={stage.id}>
+                <button
+                  type="button"
+                  onClick={expandable ? toggle : undefined}
+                  aria-expanded={expandable ? isExpanded : undefined}
+                  disabled={!expandable}
+                  className={`block w-full border-b border-faint px-4 py-2 text-left sm:px-6 max-xl:min-h-11 ${
+                    expandable ? "transition-colors hover:bg-faint" : "cursor-default"
+                  }`}
+                >
+                  <span className="flex items-baseline justify-between gap-3 font-mono uppercase tracking-[0.02em] text-quiet">
+                    <span className="flex min-w-0 items-baseline gap-2 text-[10px]">
+                      <span aria-hidden>—</span>
+                      <span className="truncate">{stage.title}</span>
+                    </span>
+                    <span className="shrink-0 text-[9px]">Did not open{expandable && <span aria-hidden> {isExpanded ? "−" : "+"}</span>}</span>
+                  </span>
+                  <span className="mt-0.5 block font-mono text-[9px] uppercase tracking-[0.02em] text-quiet tabular-nums">
+                    Configured {stage.startsAt ? formatMinute(stage.startsAt) : "—"} →{" "}
+                    {stage.endsAt && isFiniteEnd(stage.endsAt) ? formatMinute(stage.endsAt) : "—"}
+                  </span>
+                </button>
+                {panel}
+              </div>
+            );
+          }
 
           if (stage.done && !stage.active) {
             return (
@@ -4776,18 +4859,20 @@ function LaunchTimeline({
                   onClick={expandable ? toggle : undefined}
                   aria-expanded={expandable ? isExpanded : undefined}
                   disabled={!expandable}
-                  className={`flex w-full items-baseline justify-between gap-3 border-b border-faint px-4 py-2 text-left sm:px-6 max-xl:min-h-11 max-xl:items-center ${
+                  className={`block w-full border-b border-faint px-4 py-2 text-left sm:px-6 max-xl:min-h-11 ${
                     expandable ? "transition-colors hover:bg-faint" : "cursor-default"
                   }`}
                 >
-                  <span className="flex min-w-0 items-baseline gap-2 font-mono text-[10px] uppercase tracking-[0.02em] text-quiet">
-                    <span aria-hidden>✓</span>
-                    <span className="truncate">{stage.title}</span>
-                  </span>
-                  <span className="flex shrink-0 items-baseline gap-3 font-mono text-[9px] uppercase tracking-[0.02em] whitespace-nowrap text-quiet tabular-nums">
-                    <span className="w-[52px] text-right">
-                      Closed{expandable && <span aria-hidden> {isExpanded ? "−" : "+"}</span>}
+                  <span className="flex items-baseline justify-between gap-3 font-mono uppercase tracking-[0.02em] text-quiet">
+                    <span className="flex min-w-0 items-baseline gap-2 text-[10px]">
+                      <span aria-hidden>✓</span>
+                      <span className="truncate">{stage.title}</span>
                     </span>
+                    <span className="shrink-0 text-[9px]">Closed{expandable && <span aria-hidden> {isExpanded ? "−" : "+"}</span>}</span>
+                  </span>
+                  <span className="mt-0.5 block font-mono text-[9px] uppercase tracking-[0.02em] text-quiet tabular-nums">
+                    {stage.startsAt ? formatMinute(stage.startsAt) : "—"} →{" "}
+                    {stage.endsAt && isFiniteEnd(stage.endsAt) ? formatMinute(stage.endsAt) : "—"}
                   </span>
                 </button>
                 {panel}
@@ -5750,10 +5835,14 @@ function buildTimelineStages(phase: PhaseSnapshot | null, rounds: RoundTerm[], n
   }
 
   if (phase?.phaseKind === PHASE.FAILED) {
-    // Rounds that never opened before the failure are not upcoming — drop them.
+    // The configured schedule remains useful history even when the anchor
+    // fails. Keep every round/refund row and mark the stages that never opened.
     const failedAt = phase.startsAt > 0 ? phase.startsAt : nowSeconds;
-    const happened = stages.filter((stage) => stage.startsAt > 0 && stage.startsAt <= failedAt);
-    happened.push({
+    const happened = stages.filter((stage) => stage.startsAt > 0 && stage.startsAt < failedAt);
+    const skipped = stages
+      .filter((stage) => !happened.includes(stage))
+      .map((stage) => ({ ...stage, active: false, done: false, skipped: true, subtitle: `${stage.subtitle} · Did not open` }));
+    const failedStage: TimelineStage = {
       id: "failed",
       title: "Launch failed",
       subtitle: "Committed WETH is refundable from your locker",
@@ -5762,8 +5851,8 @@ function buildTimelineStages(phase: PhaseSnapshot | null, rounds: RoundTerm[], n
       active: true,
       done: false,
       failed: true,
-    });
-    return happened;
+    };
+    return [...happened, failedStage, ...skipped];
   }
 
   const finalRound = rounds[ROUND_COUNT - 1];
@@ -5947,6 +6036,17 @@ function toActivityItem(event: any, timestamp?: number): ActivityItem {
       locker: undefined,
     };
   }
+  if (name === "UnsoldSaleTokensPaid") {
+    const recipient = normalizeMaybeAddress(args.recipient);
+    return {
+      ...base,
+      label: "Unsold tokens paid to treasury",
+      detail: `${formatToken(args.amount as bigint)} unsold sale tokens paid${recipient ? ` to ${shortAddress(recipient)}` : ""}`,
+      amountToken: formatToken(args.amount as bigint),
+      recipient,
+      locker: undefined,
+    };
+  }
   return {
     ...base,
     label: humanizeEventName(name),
@@ -5972,6 +6072,10 @@ function apiToActivityItem(item: ApiActivityItem): ActivityItem {
   const weth = item.amountWeth != null && item.amountWeth !== "" ? formatEth(BigInt(item.amountWeth)) : undefined;
   const token = item.amountToken != null && item.amountToken !== "" ? formatToken(BigInt(item.amountToken)) : undefined;
   const penalty = item.penaltyWeth != null && item.penaltyWeth !== "" ? formatEth(BigInt(item.penaltyWeth)) : undefined;
+  const genericTokenAmount = item.args?.amount !== undefined && item.args.amount !== null
+    ? formatToken(toWei(item.args.amount))
+    : undefined;
+  const recipient = normalizeMaybeAddress(item.args?.recipient);
   const base = {
     id: item.id,
     event: name,
@@ -5995,6 +6099,7 @@ function apiToActivityItem(item: ApiActivityItem): ActivityItem {
         penaltyWeth: penalty,
       };
     case "VaultSettlementClaimed":
+    case "VaultSettlementCompleted":
       return {
         ...base,
         label: "Locker settled",
@@ -6022,18 +6127,40 @@ function apiToActivityItem(item: ApiActivityItem): ActivityItem {
         amountToken: token,
       };
     case "LaunchFailedRefunded":
+    case "FailedLaunchRefunded":
       return { ...base, label: "Failed launch refund", detail: weth ? `${weth} ETH refunded` : "", amountWeth: weth };
-    case "UnsoldSaleTokensBurned":
-    case "UnsoldSaleTokensPaid":
+    case "UnsoldSaleTokensBurned": {
+      const dispositionToken = token || genericTokenAmount;
       return {
         ...base,
         label: "Unsold tokens burned",
-        detail: token ? `${token} unsold sale tokens` : "",
-        amountToken: token,
+        detail: dispositionToken ? `${dispositionToken} unsold sale tokens burned` : "",
+        amountToken: dispositionToken,
         locker: undefined,
       };
+    }
+    case "UnsoldSaleTokensPaid": {
+      const dispositionToken = token || genericTokenAmount;
+      return {
+        ...base,
+        label: "Unsold tokens paid to treasury",
+        detail: dispositionToken ? `${dispositionToken} unsold sale tokens paid${recipient ? ` to ${shortAddress(recipient)}` : ""}` : "",
+        amountToken: dispositionToken,
+        recipient,
+        locker: undefined,
+      };
+    }
+    case "ClaimedTokensWithdrawn": {
+      const withdrawnToken = token || genericTokenAmount;
+      return {
+        ...base,
+        label: "Claimed tokens withdrawn",
+        detail: withdrawnToken ? `${withdrawnToken} sale tokens withdrawn` : "",
+        amountToken: withdrawnToken,
+      };
+    }
     case "Finalized":
-      return { ...base, label: "Launch finalized", detail: "Launch finalized", locker: undefined };
+      return { ...base, label: "Launch finalized", detail: "", locker: undefined };
     case "OfficialPoolCreated":
     case "LiquidityPoolCreated":
       return { ...base, label: "Official pool created", detail: "", locker: undefined, amountWeth: weth, amountToken: token };
@@ -6042,30 +6169,6 @@ function apiToActivityItem(item: ApiActivityItem): ActivityItem {
     default:
       return { ...base, label: humanizeEventName(name), detail: "" };
   }
-}
-
-/** Pure event aggregation — also drives replay, so keep it chain-free. */
-/** One on-chain action can appear twice in the indexed feed — the launch and
- *  the locker contract both emit it (distinct logs, same tx). Accounting must
- *  count each ACTION once, keyed by its semantic identity (tx + event +
- *  locker + round/amounts), preferring the canonical launch emission when a
- *  twin exists. The main activity feed keeps every raw row for display; only
- *  metrics dedupe. RPC scans only the launch contract → passes through. */
-function dedupeActivityActions(activity: ActivityItem[]): ActivityItem[] {
-  const byAction = new Map<string, ActivityItem>();
-  const passthrough: ActivityItem[] = [];
-  for (const item of activity) {
-    if (!item.locker || !ethers.isAddress(item.locker)) {
-      passthrough.push(item);
-      continue;
-    }
-    const key = [item.hash, item.event, item.locker.toLowerCase(), item.round ?? "", item.amountWeth ?? "", item.amountToken ?? "", item.penaltyWeth ?? ""].join(":");
-    const existing = byAction.get(key);
-    if (!existing || (existing.sourceKind === "locker" && item.sourceKind !== "locker")) {
-      byAction.set(key, item);
-    }
-  }
-  return [...passthrough, ...byAction.values()];
 }
 
 function aggregateLockerSummaries(activity: ActivityItem[]): LockerSummary[] {
@@ -6094,7 +6197,10 @@ function aggregateLockerSummaries(activity: ActivityItem[]): LockerSummary[] {
       current.refundedWeth += ethers.parseEther(item.amountWeth);
       if (item.penaltyWeth) current.penaltyWeth += ethers.parseEther(item.penaltyWeth);
     }
-    if (item.event === "VaultSettlementClaimed" || item.event === "LateVaultSettlementClaimed") {
+    if ((item.event === "LaunchFailedRefunded" || item.event === "FailedLaunchRefunded") && item.amountWeth) {
+      current.refundedWeth += ethers.parseEther(item.amountWeth);
+    }
+    if (item.event === "VaultSettlementClaimed" || item.event === "LateVaultSettlementClaimed" || item.event === "VaultSettlementCompleted") {
       current.settled = true;
       if (item.amountWeth) current.settledWeth += ethers.parseEther(item.amountWeth);
       if (item.amountToken) current.saleTokens += ethers.parseUnits(item.amountToken, 18);
@@ -6211,7 +6317,7 @@ function normalizeMaybeAddress(value: unknown) {
 }
 
 function humanizeEventName(name: string) {
-  return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2");
+  return name.replace(/([A-Z]+)([A-Z][a-z])/g, "$1 $2").replace(/([a-z0-9])([A-Z])/g, "$1 $2");
 }
 
 function isFiniteEnd(value: number) {

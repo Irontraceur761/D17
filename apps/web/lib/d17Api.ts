@@ -157,6 +157,7 @@ export type ApiActivityItem = {
   roundIndex?: string | null;
   amountWeth?: string | null;
   amountToken?: string | null;
+  amountNative?: string | null;
   penaltyWeth?: string | null;
   txHash: string;
   blockNumber: number;

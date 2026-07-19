@@ -224,8 +224,8 @@ function DeployForm() {
   const saleTokens = Math.trunc((supplyTokens * salePct) / 100);
   const lpTokens = Math.trunc((supplyTokens * lpPct) / 100);
   const depTokens = supportsManualDistribution ? Math.trunc((supplyTokens * depPct) / 100) : 0;
-  const burnedTokens = supplyTokens - saleTokens - lpTokens - depTokens;
-  const burnedPct = supplyTokens > 0 ? Math.round((burnedTokens / supplyTokens) * 100) : 0;
+  const deadAddressTokens = supplyTokens - saleTokens - lpTokens - depTokens;
+  const deadAddressPct = supplyTokens > 0 ? Math.round((deadAddressTokens / supplyTokens) * 100) : 0;
   const overAllocated = salePct + lpPct + (supportsManualDistribution ? depPct : 0) > 100;
 
   const startTime = useMemo(() => {
@@ -339,7 +339,7 @@ function DeployForm() {
     tokenSupply: ethers.parseUnits(String(supplyTokens), 18),
     saleTokens: ethers.parseUnits(String(saleTokens), 18),
     lpTokens: ethers.parseUnits(String(lpTokens), 18),
-    deadTokens: ethers.parseUnits(String(burnedTokens), 18),
+    deadTokens: ethers.parseUnits(String(deadAddressTokens), 18),
     deadRecipient: DEAD_RECIPIENT,
     treasury: treasuryResolved,
     startTime: resolvedStartTime,
@@ -549,7 +549,7 @@ function DeployForm() {
           <section className="mt-6 border-t border-hairline pt-5">
             <h2 className={H2}>02 · Economics</h2>
             <p className={HINT}>
-              Set sale, LP, and deployer — the rest burns automatically. Deployer tokens go to your wallet.
+              Set sale, LP, and deployer — the remainder goes to the canonical dead address. Deployer tokens go to your wallet.
             </p>
             <div className="mt-3 flex h-4 border border-hairline" aria-hidden>
               <div style={{ width: `${Math.min(salePct, 100)}%` }} className="bg-ink" />
@@ -573,7 +573,7 @@ function DeployForm() {
                 </label>
               )}
               <span className="text-quiet">
-                Burned (auto) <span className={overAllocated ? "font-semibold text-alert" : "font-semibold text-ink"}>{overAllocated ? "Over 100%" : `${burnedPct}%`}</span>
+                Dead address (auto) <span className={overAllocated ? "font-semibold text-alert" : "font-semibold text-ink"}>{overAllocated ? "Over 100%" : `${deadAddressPct}%`}</span>
               </span>
             </div>
             {supportsManualDistribution && depPct > 0 && !overAllocated && (
@@ -685,6 +685,11 @@ function DeployForm() {
               <input type="checkbox" checked={burnUnsold} onChange={(event) => setBurnUnsold(event.target.checked)} />
               Burn unsold sale tokens after finalize
             </label>
+            <p className={HINT}>
+              {burnUnsold
+                ? "Any sale tokens left unsold at finalization are burned and reduce total supply."
+                : "Any sale tokens left unsold at finalization are transferred to the published treasury."}
+            </p>
             {!ready && (
               <p className="mt-3 font-mono text-[10px] uppercase tracking-[0.02em] text-quiet">
                 Missing: <span className="text-dim">{problems.join(" · ")}</span>
@@ -776,7 +781,7 @@ function DeployForm() {
                   · Deployer <span className="font-semibold text-dim">{depPct}%</span>
                 </>
               )}{" "}
-              · Burned <span className="font-semibold text-dim">{overAllocated ? "—" : `${burnedPct}%`}</span> · Treasury{" "}
+              · Dead address <span className="font-semibold text-dim">{overAllocated ? "—" : `${deadAddressPct}%`}</span> · Treasury{" "}
               <span className="font-semibold text-dim">{treasuryPct}% ETH</span>
             </p>
           </div>

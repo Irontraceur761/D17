@@ -15,7 +15,9 @@
     "start": "next start",
     "typecheck": "tsc --noEmit",
     "test:rpc": "node scripts/smoke-rpc.mjs",
-    "test:guard": "node scripts/test-refresh-guard.mjs"
+    "test:guard": "node scripts/test-refresh-guard.mjs",
+    "test:activity-dedupe": "node scripts/test-activity-dedupe.mjs",
+    "test:activity-history": "node scripts/test-activity-history.mjs"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "1.1.15",

@@ -12,14 +12,14 @@ When you sign a D17 deploy, the factory executes the entire birth of a launch at
 
 1. **Validates everything.** The supply split must sum exactly; the treasury cut, creator allocation, and refund fee must sit under their caps; the round schedule must be coherent. A config that fails any check deploys nothing.
 2. **Deploys the trio.** Token, launch, and liquidity vault come into existence together, wired to each other and to nothing else.
-3. **Mints once, then never again.** Sale and LP tokens to the launch, the creator's allocation to the creator, the burned remainder to the dead address — then minting **closes** and token ownership is **renounced**, inside the same transaction.
+3. **Mints once, then never again.** Sale and LP tokens go to the launch, the creator's allocation goes to the creator, and the dead-address allocation goes directly to the canonical dead address — then minting **closes** and token ownership is **renounced**, inside the same transaction.
 4. **Registers the launch as canonical.** From this moment, lockers can verify it's real.
 
 There is no step two. There's no window between "token exists" and "rules apply" for anything to slip through — the launch is born complete, constrained, and ownerless, or it isn't born at all.
 
 ## The form can't express a dishonest launch
 
-The deploy page mirrors the contract's discipline. **BURNED is computed, never entered** — you allocate sale, LP, and your own slice; the remainder burns, so the split always sums. Validation is a ladder, not a dead button: if something's wrong, the page names it — a missing field, an over-cap value, a start time in the past — using the factory's own published limits, before you spend gas discovering them.
+The deploy page mirrors the contract's discipline. **DEAD ADDRESS is computed, never entered** — you allocate sale, LP, and your own slice; the remainder goes to the canonical dead address, so the split always sums. That initial allocation is not described as a burn because it does not reduce ERC-20 `totalSupply`. Validation is a ladder, not a dead button: if something's wrong, the page names it — a missing field, an over-cap value, a start time in the past — using the factory's own published limits, before you spend gas discovering them.
 
 And beside the form, the entire time: a **live preview of your launch page**, rendered with the terminal's real components. The deployed metadata can later earn the terminal's consistency mark when the token, launch, factory event, and contract URI agree. The locker performs the separate economic-rules check.
 

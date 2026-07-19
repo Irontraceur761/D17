@@ -39,7 +39,7 @@ The terminal is **read-mostly**. It shows you every launch, its live phase, the 
 ## The 60-second version
 
 1. **Find a launch.** Open the terminal; it opens on the newest launch. Switch between launches from the top bar or the **LAUNCHES** list.
-2. **Read the rules.** The masthead shows the token, the supply split (sale / LP / deployer / burned), the treasury cut, and the round schedule. **RULES · DETAILS** expands the full terms.
+2. **Read the rules.** The masthead shows the token, the supply split (sale / LP / deployer / dead address), the treasury cut, and the round schedule. **RULES · DETAILS** expands the full terms.
 3. **Connect & commit.** Connect a Sepolia wallet, create your **locker**, and commit WETH while a round is **OPEN**. You must meet the round's floor.
 4. **Change your mind?** During a **refund window** you can withdraw. Rounds 1–2 are free; rounds 3–4 charge the published deflection %; round 5 has no window.
 5. **Settle & claim.** When the rounds end the launch **finalizes** and **settles**. You **claim** your tokens; your share of the raise seeds the pool.
@@ -121,7 +121,7 @@ The screen is three columns under a top bar. Nothing is hidden behind menus — 
 ### Masthead (top center)
 - Token logo, name, and **✓ VERIFIED** when the on-chain metadata records agree.
 - **TOKEN** and **POOL** address **copy chips**.
-- The **supply split**: **SUPPLY**, **SALE %**, **LP %**, **BURNED %**, plus **DEPLOYER %** when the creator took an allocation, and **TREASURY % ETH**.
+- The **supply split**: **SUPPLY**, **SALE %**, **LP %**, **DEAD ADDRESS %**, plus **DEPLOYER %** when the creator took an allocation, and **TREASURY % ETH**.
 
 ### Center — the stage
 - **Stage banner** — the current phase in plain words (e.g. *TRADING OPEN · OFFICIAL POOL LIVE*).
@@ -157,7 +157,7 @@ The screen is three columns under a top bar. Nothing is hidden behind menus — 
 
 **ETH is always canonical.** Everything you commit, refund, and claim is denominated in WETH/ETH. The **ETH ⇄ USD** toggle (bottom of the left rail) is a **display convenience** — flip it and every value surface (masthead, tallies, rounds, pool, charts) shows a USD figure derived from a once-a-minute mainnet **ETH/USD reference**. On Sepolia this is labelled a **Mainnet reference** — testnet ETH has no real price. USD never changes what you sign.
 
-**The supply split** always sums to 100%: **SALE** (sold to committers) + **LP** (seeds the pool) + **DEPLOYER** (creator allocation, if any) + **BURNED** (the remainder). Burned is computed, never hand-entered — so the numbers can't lie.
+**The supply split** always sums to 100%: **SALE** (sold to committers) + **LP** (seeds the pool) + **DEPLOYER** (creator allocation, if any) + **DEAD ADDRESS** (the inaccessible remainder). The dead-address allocation is computed, never hand-entered — so the numbers can't lie. It remains part of ERC-20 `totalSupply`; only a real burn reduces that value.
 
 **Concentration** (TOP 10 HOLD %) is a quick read on fairness: a lower number means the token is more widely held.
 
@@ -173,7 +173,7 @@ A one-line strip up top restates the lifecycle: **ROUNDS raise ETH → REFUNDS l
 
 **1 · TOKEN** — name, **Symbol**, **Total supply**, a compact SVG data URI, description, and links. This identity is included in the on-chain metadata hash.
 
-**2 · ECONOMICS** — a split bar with inputs for **SALE / LP / DEPLOYER**; **BURNED is the remainder** and is never entered (over-allocation flags red and blocks deploy). Set **Treasury % (ETH)** and its address, and the **Min commit (WETH)** / **Round 1 floor**.
+**2 · ECONOMICS** — a split bar with inputs for **SALE / LP / DEPLOYER**; **DEAD ADDRESS is the remainder** and is never entered (over-allocation flags red and blocks deploy). Set **Treasury % (ETH)** and its address, and the **Min commit (WETH)** / **Round 1 floor**.
 
 **3 · ROUNDS & SCHEDULE** — choose when round 1 opens (with the resolved local time shown). Rounds default to a sensible preset (allocations, lengths, and a *free-early / 17%-late* refund policy) rendered as a readable schedule; **CUSTOMIZE** expands per-round editing: **Allocation**, **Length · minutes**, **Refund** window, and **Refund cost % (rounds 3–4)**.
 
@@ -208,7 +208,7 @@ The app has two data modes under the hood: **API mode** (reads the hosted indexe
 - **No custody, no keys.** The app never holds your funds or your keys. Committed WETH sits in **your** locker contract; signing happens in your wallet.
 - **Rules are published and hashed.** The locker verifies the canonical launch and exact rules hash before commitment. The masthead checkmark is the separate metadata-consistency check.
 - **You can leave.** Refund windows exist on every round but the last; failed launches refund in full.
-- **The numbers can't hide.** The supply split sums to 100% with **BURNED** computed as the remainder; concentration is shown; every commit and refund is in the public feed.
+- **The numbers can't hide.** The supply split sums to 100% with **DEAD ADDRESS** computed as the remainder; concentration is shown; every commit and refund is in the public feed.
 - **Display reads never touch your wallet.** In hosted mode the terminal reads only the indexed API — RPC is reserved for wallet signing and the deploy dry-run.
 - **Testnet is testnet.** Use a throwaway Sepolia wallet. Sepolia ETH has no monetary value; any USD figure shown is a mainnet reference only.
 
